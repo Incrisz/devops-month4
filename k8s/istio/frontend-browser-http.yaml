@@ -1,0 +1,15 @@
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: frontend-browser-http
+  namespace: mesh-lab
+spec:
+  selector:
+    matchLabels:
+      app: frontend
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    # Workload port behind the browser-facing NodePort 30400.
+    8080:
+      mode: PERMISSIVE

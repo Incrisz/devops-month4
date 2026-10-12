@@ -41,26 +41,17 @@ This is Calico's documented manifest installation method. For a local cluster Ku
 
 ```bash
 bash scripts/deploy.sh
-kubectl -n mesh-lab port-forward svc/frontend 8080:8080
 ```
 
-In browser, visit http://localhost:8080 and click **Place demo order**. Expect HTTP 200 with an approved *simulated* payment. Stop the forward using Ctrl-C. To diagnose issues: `kubectl get pods -n mesh-lab`, `kubectl describe pod -n mesh-lab -l app=orders`, `kubectl logs -n mesh-lab deployment/orders`.
+In your browser, visit **http://13.222.205.50:30400/** and click **Place demo order**. Expect HTTP 200 with an approved *simulated* payment. Use this same URL throughout the lab. To diagnose issues: `kubectl get pods -n mesh-lab`, `kubectl describe pod -n mesh-lab -l app=orders`, `kubectl logs -n mesh-lab deployment/orders`.
 
 If `ImagePullBackOff`, confirm the Docker Hub repos exist and are public, credentials were able to push, and the image tags match your username. No registry secret is necessary for public images.
 
 ### Access from another computer
 
-The frontend Service exposes NodePort `30400`. `kind-config.yaml` maps that port to all interfaces on the host. Before enabling Istio strict mTLS in phase 5, visit `http://SERVER_PUBLIC_IP:30400/` (for this server, `http://13.222.205.50:30400/`). On EC2, allow inbound TCP `30400` in the instance security group from your client public IP (`/32`), and allow the same traffic through any host firewall.
+The frontend Service exposes NodePort `30400`. `kind-config.yaml` maps that port to all interfaces on the host. Your browser connects to **http://13.222.205.50:30400/**. Port `8080` is the internal application port; the browser uses `30400`. On EC2, allow inbound TCP `30400` in the instance security group from your client public IP (`/32`), and allow the same traffic through any host firewall.
 
-Kind port mappings are applied only when the cluster is created. If your existing cluster was created with `listenAddress: "127.0.0.1"`, editing the file does not update it. To access that cluster immediately, run this **on the server** and leave it running:
-
-```bash
-kubectl -n mesh-lab port-forward --address 0.0.0.0 svc/frontend 30401:8080
-```
-
-Allow inbound TCP `30401` from your client public IP, then visit `http://13.222.205.50:30401/`. A separate port avoids conflicting with the existing Docker mapping on `30400`. This temporary forward also works after phase 5 enables strict mTLS; ordinary browser HTTP through NodePort does not satisfy strict mTLS. For permanent mesh ingress, configure an Istio ingress gateway.
-
-To use the updated mapping on `30400`, recreate the disposable lab cluster and repeat phases 2–3. Deleting the cluster removes its workloads and any lab state; do this only when you are ready to rebuild it.
+Kind port mappings are applied only when the cluster is created. If your existing cluster was created with `listenAddress: "127.0.0.1"`, editing the file does not update it. To use the updated mapping on `30400`, recreate the disposable lab cluster and repeat phases 2–3. Deleting the cluster removes its workloads and any lab state; do this only when you are ready to rebuild it. If browser access on `30400` already works, continue with the lab.
 
 If access still fails, check on the server:
 
@@ -89,11 +80,9 @@ NetworkPolicy **before** testing Istio:
 
 ```bash
 kubectl apply -f k8s/network-policy/
-# Still works (orders is allowed to contact payments):
-kubectl -n mesh-lab port-forward svc/frontend 8080:8080
 ```
 
-Click Place demo order again. For a direct unauthorized network test in another terminal:
+Refresh **http://13.222.205.50:30400/** and click **Place demo order** again. It should still work because orders is allowed to contact payments. For a direct unauthorized network test in another terminal:
 
 ```bash
 kubectl run outsider -n mesh-lab --image=busybox:1.36 --restart=Never -- sleep 3600
@@ -129,15 +118,18 @@ kubectl get pods -n mesh-lab
 
 Expected application pod READY column: `2/2` (app + proxy). `outsider` was created before injection and remains unmeshed. Delete it when done with the networking exercise: `kubectl delete pod outsider -n mesh-lab`.
 
-Apply strict mTLS and identity-based authorization:
+Apply strict mTLS and identity-based authorization, with an HTTP exception for the browser-facing frontend:
 
 ```bash
 kubectl apply -f k8s/istio/
 istioctl analyze -n mesh-lab
-kubectl -n mesh-lab port-forward svc/frontend 8080:8080
 ```
 
-Click Place demo order. It should still work because Orders has the authorized service-account identity. You can inspect identities and traffic with `istioctl proxy-config clusters deploy/orders -n mesh-lab` and `kubectl logs -n mesh-lab deploy/orders -c istio-proxy`.
+Open **http://13.222.205.50:30400/** and click **Place demo order**. It should still work because Orders has the authorized service-account identity.
+
+`frontend-browser-http.yaml` allows plaintext HTTP only on the frontend workload’s port `8080`, reached through NodePort `30400`. Orders and payments retain strict mTLS. This exception keeps direct browser access working in this lab; browsers cannot supply Istio mesh mTLS. See [Istio PeerAuthentication](https://istio.io/latest/docs/reference/config/security/peer_authentication/) for port-level policy behavior.
+
+You can inspect identities and traffic with `istioctl proxy-config clusters deploy/orders -n mesh-lab` and `kubectl logs -n mesh-lab deploy/orders -c istio-proxy`.
 
 **Important distinction:** NetworkPolicy blocks unapproved IP traffic *before* it reaches Istio. To separately demonstrate an Istio authorization `403`, temporarily remove `payments-accept-orders-only`, create a *meshed* client with a different service account, and make an HTTP call to Payments; then restore the NetworkPolicy. Do not interpret a timeout as proof of Istio authorization.
 
