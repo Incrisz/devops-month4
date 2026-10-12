@@ -48,6 +48,31 @@ In browser, visit http://localhost:8080 and click **Place demo order**. Expect H
 
 If `ImagePullBackOff`, confirm the Docker Hub repos exist and are public, credentials were able to push, and the image tags match your username. No registry secret is necessary for public images.
 
+### Access from another computer
+
+The frontend Service exposes NodePort `30400`. `kind-config.yaml` maps that port to all interfaces on the host. Before enabling Istio strict mTLS in phase 5, visit `http://SERVER_PUBLIC_IP:30400/` (for this server, `http://13.222.205.50:30400/`). On EC2, allow inbound TCP `30400` in the instance security group from your client public IP (`/32`), and allow the same traffic through any host firewall.
+
+Kind port mappings are applied only when the cluster is created. If your existing cluster was created with `listenAddress: "127.0.0.1"`, editing the file does not update it. To access that cluster immediately, run this **on the server** and leave it running:
+
+```bash
+kubectl -n mesh-lab port-forward --address 0.0.0.0 svc/frontend 30401:8080
+```
+
+Allow inbound TCP `30401` from your client public IP, then visit `http://13.222.205.50:30401/`. A separate port avoids conflicting with the existing Docker mapping on `30400`. This temporary forward also works after phase 5 enables strict mTLS; ordinary browser HTTP through NodePort does not satisfy strict mTLS. For permanent mesh ingress, configure an Istio ingress gateway.
+
+To use the updated mapping on `30400`, recreate the disposable lab cluster and repeat phases 2–3. Deleting the cluster removes its workloads and any lab state; do this only when you are ready to rebuild it.
+
+If access still fails, check on the server:
+
+```bash
+docker port mesh-lab-control-plane 30400/tcp
+kubectl -n mesh-lab get pods,svc
+kubectl -n mesh-lab get endpointslices -l kubernetes.io/service-name=frontend
+curl -v --connect-timeout 5 http://127.0.0.1:30400/
+```
+
+The Docker mapping should show `0.0.0.0:30400`, and the frontend must have a ready pod and a Service endpoint. If local access works but public access fails, check the instance public IP, security group, and host firewall.
+
 ## 4. Learn Kubernetes Networking and RBAC
 
 DNS and Service discovery: `orders.mesh-lab.svc.cluster.local` resolves within the cluster. The frontend calls `http://orders:8080`, and orders calls `http://payments:8080`.
