@@ -4,7 +4,7 @@ An intentionally small teaching application, not a production store. All payment
 
 ## 0. Prerequisites
 
-Linux or WSL2 terminal, Docker daemon running, kubectl, Kind and curl. Install Istio CLI in phase 5. Budget roughly 6–8 GB of free RAM for the 3-node cluster, Calico and Istio (actual requirements vary). Use a personal lab environment.
+Linux or WSL2 terminal, Docker daemon running, kubectl, Kind and curl. Install Istio CLI in phase 5. Budget roughly 6–8 GB of free RAM for the 3-node cluster and Istio (actual requirements vary). Use a personal lab environment.
 
 ## 1. Build Docker images and push
 
@@ -23,19 +23,25 @@ docker build -t "$DOCKERHUB_USER/mesh-frontend:v1" ./frontend
 docker push "$DOCKERHUB_USER/mesh-frontend:v1"
 ```
 
-## 2. Create a Kind cluster with Calico
+## 2. Create a Kind cluster
 
-**Important:** Kind's default CNI does *not* enforce Kubernetes NetworkPolicy. This lab intentionally disables it and installs Calico. Nodes can be `NotReady` until Calico starts.
+New clusters use Kind's default networking. No separate Calico installation is needed for this RBAC and Istio lab.
 
 ```bash
 kind create cluster --name mesh-lab --config kind-config.yaml
 kubectl config use-context kind-mesh-lab
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/calico.yaml
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get pods -A
 ```
 
-This is Calico's documented manifest installation method. For a local cluster Kubernetes version not supported by the selected Calico version, consult https://docs.tigera.io/calico/latest/getting-started/kubernetes/kind . If Calico install reports API/resource errors, stop and fix CNI before proceeding.
+If you already have a working cluster with Calico, keep it; no networking migration or cluster recreation is needed. Remove the previous lab policy and test pod **on your server** so they do not interfere with the Istio exercise:
+
+```bash
+kubectl delete networkpolicy payments-accept-orders-only -n mesh-lab --ignore-not-found
+kubectl delete pod outsider -n mesh-lab --ignore-not-found
+```
+
+If an older cluster has its default CNI disabled but Calico was never installed, it still needs a working CNI before continuing. The updated Kind configuration only applies to newly created clusters.
 
 ## 3. Deploy images from Docker Hub
 
@@ -64,11 +70,13 @@ curl -v --connect-timeout 5 http://127.0.0.1:30400/
 
 The Docker mapping should show `0.0.0.0:30400`, and the frontend must have a ready pod and a Service endpoint. If local access works but public access fails, check the instance public IP, security group, and host firewall.
 
-## 4. Learn Kubernetes Networking and RBAC
+## 4. Learn Kubernetes RBAC
 
 DNS and Service discovery: `orders.mesh-lab.svc.cluster.local` resolves within the cluster. The frontend calls `http://orders:8080`, and orders calls `http://payments:8080`.
 
-Create Role and RoleBinding:
+Orders uses `orders-sa` as its service-account identity, including for Istio. The application does not call the Kubernetes API, so it does not require pod-reader permissions. RBAC is a separate Kubernetes API exercise; removing its RoleBinding does not block HTTP calls to payments.
+
+Create Role and RoleBinding and check permissions:
 
 ```bash
 kubectl apply -f k8s/rbac/
@@ -76,21 +84,13 @@ kubectl auth can-i list pods -n mesh-lab --as=system:serviceaccount:mesh-lab:ord
 kubectl auth can-i delete pods -n mesh-lab --as=system:serviceaccount:mesh-lab:orders-sa # no
 ```
 
-NetworkPolicy **before** testing Istio:
+Remove the grant and check again (assuming no other binding grants access):
 
 ```bash
-kubectl apply -f k8s/network-policy/
+kubectl delete rolebinding orders-pod-reader -n mesh-lab
+kubectl auth can-i list pods -n mesh-lab --as=system:serviceaccount:mesh-lab:orders-sa   # no
+kubectl apply -f k8s/rbac/
 ```
-
-Refresh **http://13.222.205.50:30400/** and click **Place demo order** again. It should still work because orders is allowed to contact payments. For a direct unauthorized network test in another terminal:
-
-```bash
-kubectl run outsider -n mesh-lab --image=busybox:1.36 --restart=Never -- sleep 3600
-kubectl wait --for=condition=Ready pod/outsider -n mesh-lab --timeout=120s
-kubectl exec -n mesh-lab outsider -- wget -T 3 -qO- http://payments:8080/health
-```
-
-The outsider request should time out because Calico enforces the NetworkPolicy. If it succeeds, verify Calico is healthy and the network policy exists.
 
 ## 5. Add Istio
 
@@ -116,7 +116,7 @@ kubectl rollout status deployment/payments -n mesh-lab
 kubectl get pods -n mesh-lab
 ```
 
-Expected application pod READY column: `2/2` (app + proxy). `outsider` was created before injection and remains unmeshed. Delete it when done with the networking exercise: `kubectl delete pod outsider -n mesh-lab`.
+Expected application pod READY column: `2/2` (app + proxy). Orders must use `orders-sa`; the base manifest creates and assigns it. If upgrading an older deployment, run `bash scripts/deploy.sh` before continuing.
 
 Apply strict mTLS and identity-based authorization, with an HTTP exception for the browser-facing frontend:
 
@@ -131,7 +131,38 @@ Open **http://13.222.205.50:30400/** and click **Place demo order**. It should s
 
 You can inspect identities and traffic with `istioctl proxy-config clusters deploy/orders -n mesh-lab` and `kubectl logs -n mesh-lab deploy/orders -c istio-proxy`.
 
-**Important distinction:** NetworkPolicy blocks unapproved IP traffic *before* it reaches Istio. To separately demonstrate an Istio authorization `403`, temporarily remove `payments-accept-orders-only`, create a *meshed* client with a different service account, and make an HTTP call to Payments; then restore the NetworkPolicy. Do not interpret a timeout as proof of Istio authorization.
+### Browser exercise: deny and allow payments with Istio
+
+Start with the policies above applied. At **http://13.222.205.50:30400/**, click **Place demo order** and confirm HTTP 200.
+
+Temporarily remove all allow rules from the payments authorization policy:
+
+```bash
+kubectl patch authorizationpolicy payments-orders-only -n mesh-lab \
+  --type=merge -p '{"spec":{"rules":[]}}'
+```
+
+After the proxies receive the update, click again. Istio rejects the request to payments with HTTP 403. The current app wraps downstream failures, so **the browser shows HTTP 502**, not the original 403.
+
+To see the actual Istio response from the orders pod:
+
+```bash
+kubectl exec -n mesh-lab deploy/orders -c orders -- python -c 'import urllib.request; urllib.request.urlopen("http://payments:8080/health", timeout=5)'
+```
+
+Expected while blocked: `HTTP Error 403: Forbidden`. This command runs a diagnostic in the existing container; it does not modify application code.
+
+Restore orders access:
+
+```bash
+kubectl apply -f k8s/istio/payments-authorization.yaml
+```
+
+Wait briefly for propagation and click **Place demo order** again. Expect HTTP 200. No image rebuilds or pod restarts are needed for these policy changes.
+
+An ALLOW policy with no rules permits no requests, assuming no other matching ALLOW policy grants access. Deleting the policy entirely removes that authorization restriction; it does not block orders. See [Istio AuthorizationPolicy](https://istio.io/latest/docs/reference/config/security/authorization-policy/).
+
+RBAC controls Kubernetes API actions; Istio authorization controls which service identity can call payments. Removing the RBAC RoleBinding will not stop orders, because this app does not use the Kubernetes API. Use the Istio exercise to demonstrate application access being denied and restored.
 
 ## 6. Cleanup
 
@@ -141,7 +172,7 @@ kind delete cluster --name mesh-lab
 
 ## Notes
 
-- RBAC protects the Kubernetes API; NetworkPolicy protects pod traffic; Istio AuthorizationPolicy controls authenticated service-to-service requests. They are different layers.
+- RBAC protects the Kubernetes API; Istio mTLS secures mesh traffic; Istio AuthorizationPolicy controls authenticated service-to-service requests.
 - For this demo all images are public and tagged `v1`; production workflows should use immutable digests, CI, scans, registry access controls, resource budgets, monitoring, secrets and separate environments.
 - Python standard-library server is deliberately minimal for learning, not a production web server.
 # devops-month4

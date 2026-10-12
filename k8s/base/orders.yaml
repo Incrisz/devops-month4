@@ -1,3 +1,9 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orders-sa
+  namespace: mesh-lab
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +19,7 @@ spec:
       labels:
         app: orders
     spec:
+      serviceAccountName: orders-sa
       containers:
         - name: orders
           image: DOCKERHUB_USER/mesh-orders:v1
