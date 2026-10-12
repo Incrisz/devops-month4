@@ -8,10 +8,4 @@ spec:
     matchLabels:
       app: payments
   action: ALLOW
-  rules:
-    - from:
-        - source:
-            principals: ["cluster.local/ns/mesh-lab/sa/orders-sa"]
-      to:
-        - operation:
-            ports: ["8080"]
+  rules: []
